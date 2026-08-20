@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+name=$1
+port=$2
+online_dir=$HOME/.local/state/reverse-tunnels/online
+mkdir -p "$online_dir"
+state_file=$online_dir/$name.tsv
+connected_at=$(date +%s)
+remote_ip=${SSH_CONNECTION%% *}
+printf '%s\t%s\t%s\t%s\n' "$connected_at" "$$" "$remote_ip" "$port" > "$state_file.tmp.$$"
+mv "$state_file.tmp.$$" "$state_file"
+cleanup() {
+  if [[ -f $state_file ]]; then
+    state_pid=$(awk -F '\t' 'NR == 1 { print $2 }' "$state_file")
+    [[ $state_pid == $$ ]] && rm -f "$state_file"
+  fi
+}
+trap cleanup EXIT HUP INT TERM
+while :; do sleep 3600 & wait $!; done

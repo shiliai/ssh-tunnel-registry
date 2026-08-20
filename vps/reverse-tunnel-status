@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+base=$HOME/.local/state/reverse-tunnels
+registry_dir=$base/registry
+online_dir=$base/online
+
+duration() {
+  local seconds=$1 days hours minutes
+  days=$((seconds / 86400))
+  hours=$(((seconds % 86400) / 3600))
+  minutes=$(((seconds % 3600) / 60))
+  if ((days)); then printf '%dd %02dh %02dm' "$days" "$hours" "$minutes"
+  elif ((hours)); then printf '%dh %02dm' "$hours" "$minutes"
+  else printf '%dm' "$minutes"
+  fi
+}
+
+printf '%-30s %-7s %-8s %-20s %-12s %s\n' HOST PORT STATUS ONLINE-SINCE DURATION TARGET-USER
+found=0
+for record in "$registry_dir"/*.tsv; do
+  [[ -e $record ]] || continue
+  found=1
+  IFS=$'\t' read -r name port target_user registered_at fingerprint mode < "$record"
+  status=OFFLINE
+  since=-
+  elapsed=-
+  state=$online_dir/$name.tsv
+  listening=0
+  if ss -H -ltn "sport = :$port" 2>/dev/null | grep -q .; then listening=1; fi
+  if ((listening)) && [[ -f $state ]]; then
+    IFS=$'\t' read -r connected_at session_pid remote_ip state_port < "$state"
+    if [[ $state_port == "$port" && $connected_at =~ ^[0-9]+$ ]]; then
+      status=ONLINE
+      since=$(date -d "@$connected_at" '+%F %T' 2>/dev/null || date -r "$connected_at" '+%F %T')
+      elapsed=$(duration "$(($(date +%s) - connected_at))")
+    fi
+  elif ((listening)) && [[ $mode == legacy ]]; then
+    status=ONLINE
+    socket_line=$(sudo -n ss -H -ltnp "sport = :$port" 2>/dev/null | head -n 1 || true)
+    socket_pid=$(sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' <<<"$socket_line")
+    if [[ -n $socket_pid ]]; then
+      process_age=$(sudo -n ps -o etimes= -p "$socket_pid" 2>/dev/null | awk 'NR == 1 { print $1 }')
+      if [[ $process_age =~ ^[0-9]+$ ]]; then
+        connected_at=$(($(date +%s) - process_age))
+        since=$(date -d "@$connected_at" '+%F %T' 2>/dev/null || date -r "$connected_at" '+%F %T')
+        elapsed=$(duration "$process_age")
+      fi
+    fi
+  fi
+  printf '%-30s %-7s %-8s %-20s %-12s %s\n' "$name" "$port" "$status" "$since" "$elapsed" "$target_user"
+done
+((found)) || printf '%s\n' '(no registered hosts)'
