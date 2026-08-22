@@ -118,3 +118,57 @@ ssh feishu-APP-Pvjp-000 '~/.local/bin/reverse-tunnel-status'
 
 The service uses SSH keepalives and systemd restart policy, so it reconnects
 automatically after network interruption or reboot.
+
+### SELinux Enforcing hosts (RHEL-family / openEuler)
+
+On hosts with **SELinux enforcing**, the tunnel service (run by systemd in the
+`init_t` domain) fails immediately with `status=203/EXEC`, e.g.:
+
+```
+Process: 12345 ExecStart=/usr/bin/ssh ... (code=exited, status=203/EXEC)
+journalctl: reverse-ssh-tunnel.service: Failed with result 'exit-code'
+```
+
+Cause: `init_t` is denied several operations by SELinux. Confirm with
+`ausearch -m AVC -ts recent` or the raw AVCs in `/var/log/audit/audit.log`
+(`avc:  denied  { ... } ... scontext=...:init_t:s0 ...`). The denials that block
+the tunnel are:
+
+1. Executing `/usr/bin/ssh` (`ssh_exec_t`) — needs `execute open read
+   execute_no_trans map` on the file.
+2. Connecting out to the jump host port (`unreserved_port_t`) — needs
+   `name_connect`.
+3. **Reverse forward loopback** — needs `name_connect` to `ssh_port_t`.
+   Without this, the VPS shows the listener `127.0.0.1:PORT` and the session is
+   ONLINE, but clients connecting to it get `connection reset` /
+   `kex_exchange_identification: Connection closed` because the target's ssh
+   (root, `init_t`) cannot connect back to its own `127.0.0.1:22`.
+
+Fix by installing a minimal local policy module (on the target, as root):
+
+```bash
+cat > /tmp/reverse-ssh-tunnel.te <<'EOF'
+module reverse-ssh-tunnel 1.0;
+
+require {
+  type init_t;
+  type ssh_exec_t;
+  type unreserved_port_t;
+  type ssh_port_t;
+  class file { execute open read execute_no_trans map };
+  class tcp_socket name_connect;
+}
+
+allow init_t ssh_exec_t:file { execute open read execute_no_trans map };
+allow init_t unreserved_port_t:tcp_socket name_connect;
+allow init_t ssh_port_t:tcp_socket name_connect;
+EOF
+cd /tmp && checkmodule -M -m -o reverse-ssh-tunnel.mod reverse-ssh-tunnel.te \
+  && semodule_package -o reverse-ssh-tunnel.pp -m reverse-ssh-tunnel.mod \
+  && semodule -i reverse-ssh-tunnel.pp && systemctl restart reverse-ssh-tunnel
+```
+
+(`checkmodule`/`semodule_package` come from `checkpolicy` and
+`policycoreutils-python-utils`. If a previous settings left the service in a
+half-tunneled state, `systemctl restart reverse-ssh-tunnel` after loading the
+module. Removing it later: `semodule -r reverse-ssh-tunnel`.)
