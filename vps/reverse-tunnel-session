@@ -1,19 +1,208 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-name=$1
-port=$2
-online_dir=$HOME/.local/state/reverse-tunnels/online
-mkdir -p "$online_dir"
-state_file=$online_dir/$name.tsv
-connected_at=$(date +%s)
-remote_ip=${SSH_CONNECTION%% *}
-printf '%s\t%s\t%s\t%s\n' "$connected_at" "$$" "$remote_ip" "$port" > "$state_file.tmp.$$"
-mv "$state_file.tmp.$$" "$state_file"
-cleanup() {
-  if [[ -f $state_file ]]; then
-    state_pid=$(awk -F '\t' 'NR == 1 { print $2 }' "$state_file")
-    [[ $state_pid == $$ ]] && rm -f "$state_file"
+
+PROGRAM=${0##*/}
+BASE=$HOME/.local/state/reverse-tunnels
+REGISTRY_DIR=$BASE/registry
+ONLINE_DIR=$BASE/online
+STATUS_COMMAND=${0%/*}/reverse-tunnel-status
+RESET_WAIT_SECONDS=${REVERSE_TUNNEL_RESET_WAIT_SECONDS:-20}
+
+usage() {
+  cat <<EOF
+Manage reverse SSH tunnel sessions on the jump host.
+
+Usage:
+  $PROGRAM status
+  $PROGRAM health HOST
+  $PROGRAM reset HOST
+  $PROGRAM help
+
+Commands:
+  status       List registered tunnels, state, and online duration.
+  health HOST  Verify the listener and read an SSH banner through the tunnel.
+  reset HOST   Terminate only HOST's tunnel session and wait for reconnection.
+  help         Show this help.
+
+Internal interface:
+  $PROGRAM serve HOST PORT
+
+The serve command is used by forced authorized_keys entries. Managed target
+hosts must run the tunnel under a restart policy (normally systemd) for reset
+to reconnect automatically. Reset does not restart sshd on the target host.
+EOF
+}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+validate_name() {
+  [[ $1 =~ ^[A-Za-z0-9._#-]+$ ]] || die "invalid host name: $1"
+}
+
+validate_port() {
+  [[ $1 =~ ^[0-9]+$ ]] && ((1 <= 10#$1 && 10#$1 <= 65535)) ||
+    die "invalid port: $1"
+}
+
+load_record() {
+  local requested_name=$1 record=$REGISTRY_DIR/$1.tsv
+  [[ -f $record ]] || die "host is not registered: $requested_name"
+  IFS=$'\t' read -r RECORD_NAME RECORD_PORT RECORD_USER RECORD_REGISTERED_AT RECORD_FINGERPRINT RECORD_MODE < "$record"
+  [[ $RECORD_NAME == "$requested_name" ]] || die "registry name mismatch for $requested_name"
+  validate_port "$RECORD_PORT"
+}
+
+listener_pid() {
+  local port=$1 line
+  line=$(sudo -n ss -H -ltnp "sport = :$port" 2>/dev/null | head -n 1 || true)
+  sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' <<<"$line"
+}
+
+read_banner() {
+  local port=$1
+  timeout 4 bash -c '
+    exec 3<>"/dev/tcp/127.0.0.1/$1"
+    IFS= read -r line <&3
+    printf "%s" "$line"
+  ' _ "$port" 2>/dev/null || true
+}
+
+health_state() {
+  local port=$1
+  HEALTH_LISTENING=0
+  HEALTH_BANNER=
+  if ss -H -ltn "sport = :$port" 2>/dev/null | grep -q .; then
+    HEALTH_LISTENING=1
+    HEALTH_BANNER=$(read_banner "$port")
   fi
 }
-trap cleanup EXIT HUP INT TERM
-while :; do sleep 3600 & wait $!; done
+
+serve() {
+  local name=$1 port=$2 state_file connected_at remote_ip
+  validate_name "$name"
+  validate_port "$port"
+  mkdir -p "$ONLINE_DIR"
+  state_file=$ONLINE_DIR/$name.tsv
+  connected_at=$(date +%s)
+  remote_ip=${SSH_CONNECTION%% *}
+  printf '%s\t%s\t%s\t%s\n' "$connected_at" "$$" "$remote_ip" "$port" > "$state_file.tmp.$$"
+  mv "$state_file.tmp.$$" "$state_file"
+
+  cleanup() {
+    local state_pid
+    if [[ -f $state_file ]]; then
+      state_pid=$(awk -F '\t' 'NR == 1 { print $2 }' "$state_file")
+      [[ $state_pid == $$ ]] && rm -f "$state_file"
+    fi
+  }
+
+  trap cleanup EXIT HUP INT TERM
+  while :; do sleep 3600 & wait $!; done
+}
+
+show_status() {
+  [[ -x $STATUS_COMMAND ]] || die "status command is missing: $STATUS_COMMAND"
+  exec "$STATUS_COMMAND"
+}
+
+show_health() {
+  local name=$1
+  validate_name "$name"
+  load_record "$name"
+  health_state "$RECORD_PORT"
+  if ((HEALTH_LISTENING == 0)); then
+    printf '%s port=%s OFFLINE no-listener\n' "$name" "$RECORD_PORT"
+    return 1
+  fi
+  if [[ $HEALTH_BANNER == SSH-* ]]; then
+    printf '%s port=%s HEALTHY %s\n' "$name" "$RECORD_PORT" "$HEALTH_BANNER"
+    return 0
+  fi
+  printf '%s port=%s UNHEALTHY listener-present/no-SSH-banner\n' "$name" "$RECORD_PORT"
+  return 2
+}
+
+reset_tunnel() {
+  local name=$1 state_file old_session_pid= old_listener_pid= process_args= process_name=
+  local deadline new_session_pid= new_listener_pid=
+  validate_name "$name"
+  load_record "$name"
+  state_file=$ONLINE_DIR/$name.tsv
+
+  if [[ -f $state_file ]]; then
+    old_session_pid=$(awk -F '\t' 'NR == 1 { print $2 }' "$state_file")
+    [[ $old_session_pid =~ ^[0-9]+$ ]] || die "invalid session PID for $name"
+    process_args=$(ps -p "$old_session_pid" -o args= 2>/dev/null || true)
+    if [[ -z $process_args ]]; then
+      printf 'State PID %s is stale; falling back to the verified listener process.\n' "$old_session_pid"
+      old_session_pid=
+    elif [[ $process_args == *reverse-tunnel-session* ]]; then
+      kill -TERM "$old_session_pid"
+    else
+      die "refusing to terminate PID $old_session_pid: it is not a tunnel session"
+    fi
+  fi
+  if [[ -z $old_session_pid ]]; then
+    old_listener_pid=$(listener_pid "$RECORD_PORT")
+    [[ -n $old_listener_pid ]] || die "$name is already offline; no session to reset"
+    process_name=$(sudo -n ps -p "$old_listener_pid" -o comm= 2>/dev/null | awk 'NR == 1 {print $1}')
+    [[ $process_name == sshd ]] ||
+      die "refusing to terminate PID $old_listener_pid: listener is not owned by sshd"
+    sudo -n kill -TERM "$old_listener_pid"
+  fi
+
+  printf 'Reset requested for %s (port %s); waiting up to %ss for reconnection...\n' \
+    "$name" "$RECORD_PORT" "$RESET_WAIT_SECONDS"
+  deadline=$(($(date +%s) + RESET_WAIT_SECONDS))
+  while (($(date +%s) <= deadline)); do
+    sleep 1
+    health_state "$RECORD_PORT"
+    ((HEALTH_LISTENING)) || continue
+    if [[ -n $old_session_pid ]]; then
+      [[ -f $state_file ]] || continue
+      new_session_pid=$(awk -F '\t' 'NR == 1 { print $2 }' "$state_file")
+      [[ $new_session_pid != "$old_session_pid" ]] || continue
+    else
+      new_listener_pid=$(listener_pid "$RECORD_PORT")
+      [[ -n $new_listener_pid && $new_listener_pid != "$old_listener_pid" ]] || continue
+    fi
+    if [[ $HEALTH_BANNER == SSH-* ]]; then
+      printf '%s reconnected successfully: %s\n' "$name" "$HEALTH_BANNER"
+      return 0
+    fi
+  done
+  die "$name did not become healthy within ${RESET_WAIT_SECONDS}s; check the target tunnel service and sshd"
+}
+
+if (($# == 2)) && [[ $2 =~ ^[0-9]+$ ]]; then
+  serve "$1" "$2"
+  exit
+fi
+
+case ${1:-help} in
+  serve)
+    [[ $# == 3 ]] || die "serve requires HOST and PORT"
+    serve "$2" "$3"
+    ;;
+  status)
+    [[ $# == 1 ]] || die "status takes no arguments"
+    show_status
+    ;;
+  health)
+    [[ $# == 2 ]] || die "health requires HOST"
+    show_health "$2"
+    ;;
+  reset)
+    [[ $# == 2 ]] || die "reset requires HOST"
+    reset_tunnel "$2"
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    die "unknown command: $1 (run '$PROGRAM help')"
+    ;;
+esac
