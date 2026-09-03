@@ -63,7 +63,21 @@ Or directly on `feishu-APP-Pvjp-000`:
 
 ```bash
 ~/.local/bin/reverse-tunnel-status
+# Equivalent unified command:
+~/.local/bin/reverse-tunnel-session status
 ```
+
+Check or reset one tunnel from the VPS:
+
+```bash
+~/.local/bin/reverse-tunnel-session health HQAIS-8852-via-vps
+~/.local/bin/reverse-tunnel-session reset HQAIS-8852-via-vps
+~/.local/bin/reverse-tunnel-session help
+```
+
+Reset terminates only the selected reverse SSH session, waits for the target's
+restart policy to reconnect, and verifies an SSH banner through the tunnel. It
+does not restart the VPS sshd or the target sshd.
 
 Example output:
 

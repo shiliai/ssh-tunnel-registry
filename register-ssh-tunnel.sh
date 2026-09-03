@@ -3,6 +3,7 @@
 set -Eeuo pipefail
 
 PROGRAM=${0##*/}
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 DEFAULT_JUMP_HOST=feishu-APP-Pvjp-000
 DEFAULT_LOCAL_SSH_PORT=22
 PORT_POOL_START=20000
@@ -201,11 +202,13 @@ TARGET_HOST_KEYS=$(awk -F '\t' '$1 == "TARGET_HOST_KEY" { print $2 }' <<<"$TARGE
 [[ -n $TUNNEL_PUBLIC_KEY ]] || die "target did not return a tunnel public key"
 [[ -n $TARGET_HOST_KEYS ]] || die "target did not return SSH host keys"
 TUNNEL_PUBLIC_KEY_B64=$(printf '%s\n' "$TUNNEL_PUBLIC_KEY" | base64 | tr -d '\n')
+SESSION_SCRIPT_B64=$(base64 < "$SCRIPT_DIR/vps/reverse-tunnel-session" | tr -d '\n')
 
 REQUESTED_PORT=${REMOTE_PORT:-auto}
 info "Registering $NAME on $JUMP_HOST (port: $REQUESTED_PORT)"
 VPS_OUTPUT=$(ssh -T "${SSH_BASE[@]}" "$JUMP_HOST" bash -s -- \
-  "$NAME" "$REQUESTED_PORT" "$TARGET_USER" "$TUNNEL_PUBLIC_KEY_B64" "$PORT_POOL_START" "$PORT_POOL_END" <<'VPS_REGISTER'
+  "$NAME" "$REQUESTED_PORT" "$TARGET_USER" "$TUNNEL_PUBLIC_KEY_B64" "$PORT_POOL_START" "$PORT_POOL_END" \
+  "$SESSION_SCRIPT_B64" <<'VPS_REGISTER'
 set -Eeuo pipefail
 name=$1
 requested_port=$2
@@ -213,6 +216,7 @@ target_user=$3
 public_key=$(printf '%s' "$4" | base64 -d)
 pool_start=$5
 pool_end=$6
+session_script_b64=$7
 bin_dir=$HOME/.local/bin
 state_dir=$HOME/.local/state/reverse-tunnels
 registry_dir=$state_dir/registry
@@ -323,6 +327,12 @@ chmod 0755 "$bin_dir/reverse-tunnel-session.new"
 backup_if_changed "$bin_dir/reverse-tunnel-session" "$bin_dir/reverse-tunnel-session.new"
 mv "$bin_dir/reverse-tunnel-session.new" "$bin_dir/reverse-tunnel-session"
 
+# Replace the bootstrap serve-only implementation with the repository's unified command.
+printf '%s' "$session_script_b64" | base64 -d > "$bin_dir/reverse-tunnel-session.new"
+chmod 0755 "$bin_dir/reverse-tunnel-session.new"
+backup_if_changed "$bin_dir/reverse-tunnel-session" "$bin_dir/reverse-tunnel-session.new"
+mv "$bin_dir/reverse-tunnel-session.new" "$bin_dir/reverse-tunnel-session"
+
 cat > "$bin_dir/reverse-tunnel-status.new" <<'STATUS_SCRIPT'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -402,7 +412,7 @@ chmod 0600 "$authorized_keys"
 marker="reverse-tunnel:$name"
 awk -v marker="$marker" 'index($0, marker) == 0' "$authorized_keys" > "$authorized_keys.new"
 session_command=$bin_dir/reverse-tunnel-session
-printf 'restrict,port-forwarding,permitlisten="127.0.0.1:%s",command="%s %s %s" %s %s\n' \
+printf 'restrict,port-forwarding,permitlisten="127.0.0.1:%s",command="%s serve %s %s" %s %s\n' \
   "$port" "$session_command" "$name" "$port" "$public_key" "$marker" >> "$authorized_keys.new"
 backup_if_changed "$authorized_keys" "$authorized_keys.new"
 mv "$authorized_keys.new" "$authorized_keys"
