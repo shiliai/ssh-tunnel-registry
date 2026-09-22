@@ -1,0 +1,23 @@
+serverAddr = "ssh-relay.dsh.onlyservice.io"
+serverPort = 443
+user = "__NAME__"
+auth.token = "__TOKEN__"
+transport.protocol = "wss"
+transport.tls.serverName = "ssh-relay.dsh.onlyservice.io"
+transport.poolCount = 4
+loginFailExit = false
+
+[[proxies]]
+name = "__NAME__-ssh"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 22
+remotePort = __PORT__
+
+# LAN 中继（可选，可重复多段）：把同网段其它主机的 22 也带出来
+# [[proxies]]
+# name = "__NAME__-lan-HOSTNAME"
+# type = "tcp"
+# localIP = "10.18.8.XX"
+# localPort = 22
+# remotePort = __PORT2__
