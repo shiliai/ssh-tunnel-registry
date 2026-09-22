@@ -4,6 +4,9 @@ user = "__NAME__"
 auth.token = "__TOKEN__"
 transport.protocol = "wss"
 transport.tls.serverName = "ssh-relay.dsh.onlyservice.io"
+# 出口被 WFilter 标记的主机必须走代理链（ROS -> jetson xray），
+# 否则 WSS 会话登录后 ~1s 即被杀。出口干净的主机删除此行。
+transport.proxyURL = "socks5://10.18.8.43:10808"
 transport.poolCount = 4
 loginFailExit = false
 
