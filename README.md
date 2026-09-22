@@ -3,6 +3,9 @@
 `register-ssh-tunnel.sh` registers a Linux host behind NAT as a persistent
 reverse SSH tunnel through `feishu-APP-Pvjp-000`.
 
+> 站点出口做 DPI 杀伤时裸 ssh 隧道不可用 —— 备选方案见
+> [`wss-relay/`](wss-relay/)（frp over WSS + LAN 中继 + SNI 网关，2026-09 验证）。
+
 The script runs on the controller (the machine that already has SSH aliases for
 the new host and the VPS). It performs four operations:
 
