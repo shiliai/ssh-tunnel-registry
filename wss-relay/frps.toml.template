@@ -1,0 +1,6 @@
+bindAddr = "0.0.0.0"
+bindPort = 7000
+# auth.token 建议用文件注入避免落命令行历史：
+#   auth.token = "$(cat /opt/ssh-relay/token)"
+auth.token = "__TOKEN__"
+allowPorts = [{ start = 21000, end = 21999 }]

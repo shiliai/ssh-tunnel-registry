@@ -1,0 +1,12 @@
+[Unit]
+Description=ssh-relay frpc (WSS to Tokyo ssh-relay.dsh.onlyservice.io)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/opt/ssh-relay/frpc -c /opt/ssh-relay/frpc.toml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
